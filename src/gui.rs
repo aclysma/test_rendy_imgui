@@ -32,14 +32,30 @@ use rendy::shader::SpirvReflection;
 #[cfg(not(feature = "spirv-reflection"))]
 use vertex::AsVertex;
 
-// This defines a view-projection matrix
-#[derive(Clone, Copy)]
-#[repr(C, align(16))]
-struct UniformArgs {
-    pub mvp: nalgebra::Matrix4<f32>,
+lazy_static::lazy_static! {
+    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/gui.vert"),
+        ShaderKind::Vertex,
+        SourceLanguage::GLSL,
+        "main",
+    );
+
+    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/gui.frag"),
+        ShaderKind::Fragment,
+        SourceLanguage::GLSL,
+        "main",
+    );
+
+    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
+        .with_vertex(&*VERTEX).unwrap()
+        .with_fragment(&*FRAGMENT).unwrap();
 }
 
-const UNIFORM_SIZE: u64 = std::mem::size_of::<UniformArgs>() as u64;
+#[cfg(feature = "spirv-reflection")]
+lazy_static::lazy_static! {
+    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
+}
 
 /// Type for position attribute of vertex.
 #[repr(transparent)]
@@ -56,7 +72,7 @@ where
 }
 impl vertex::AsAttribute for Position2 {
     const NAME: &'static str = "position2";
-    const FORMAT: gfx_hal::format::Format = gfx_hal::format::Format::Rg32Float;
+    const FORMAT: gfx_hal::format::Format = gfx_hal::format::Format::Rg32Sfloat;
 }
 
 /// Type for color attribute of vertex.
@@ -101,29 +117,53 @@ impl AsVertex for PosTexColor {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/gui.vert"),
-        ShaderKind::Vertex,
-        SourceLanguage::GLSL,
-        "main",
-    );
-
-    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/gui.frag"),
-        ShaderKind::Fragment,
-        SourceLanguage::GLSL,
-        "main",
-    );
-
-    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
-        .with_vertex(&*VERTEX).unwrap()
-        .with_fragment(&*FRAGMENT).unwrap();
+// This defines a view-projection matrix
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct UniformArgs {
+    pub mvp: nalgebra::Matrix4<f32>,
 }
 
-#[cfg(feature = "spirv-reflection")]
-lazy_static::lazy_static! {
-    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
+impl UniformArgs {
+    fn new(frame_size: &imgui::FrameSize) -> UniformArgs {
+        // DETERMINE VIEW MATRIX (just once)
+        let view = glm::look_at_rh(
+            &glm::make_vec3(&[0.0, 0.0, 5.0]),
+            &glm::make_vec3(&[0.0, 0.0, 0.0]),
+            &glm::make_vec3(&[0.0, 1.0, 0.0]).normalize(),
+        );
+
+        let projection = glm::ortho_rh_zo(
+            0.0,
+            frame_size.logical_size.0 as f32,
+            0.0,
+            frame_size.logical_size.1 as f32,
+            -100.0,
+            100.0,
+        );
+
+        // COMBINE THE VIEW AND PROJECTION MATRIX AHEAD OF TIME (just once)
+        let mvp = projection * view;
+
+        return UniformArgs { mvp };
+    }
+}
+
+const UNIFORM_SIZE: u64 = std::mem::size_of::<UniformArgs>() as u64;
+
+// For publishing the frame count as a resource
+pub struct SwapchainBackbufferCount {
+    backbuffer_count: u32,
+}
+
+impl SwapchainBackbufferCount {
+    pub fn new(backbuffer_count: u32) -> Self {
+        return SwapchainBackbufferCount { backbuffer_count };
+    }
+
+    pub fn get_backbuffer_count(&self) -> u32 {
+        return self.backbuffer_count;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -136,6 +176,7 @@ where
     type Pipeline = ImguiRenderPipeline<B>;
 
     fn depth_stencil(&self) -> Option<gfx_hal::pso::DepthStencilDesc> {
+        //TODO: imgui should be stenciled
         None
     }
 
@@ -144,7 +185,7 @@ where
         factory: &mut Factory<B>,
         _aux: &Resources,
     ) -> rendy::shader::ShaderSet<B> {
-        SHADERS.build(factory).unwrap()
+        SHADERS.build(factory, Default::default()).unwrap()
     }
 
     fn vertices(
@@ -152,7 +193,7 @@ where
     ) -> Vec<(
         Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
         gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        gfx_hal::pso::VertexInputRate,
     )> {
         #[cfg(feature = "spirv-reflection")]
         return vec![SHADER_REFLECTION
@@ -161,7 +202,7 @@ where
             .gfx_vertex_input_desc(0)];
 
         #[cfg(not(feature = "spirv-reflection"))]
-        return vec![PosTexColor::vertex().gfx_vertex_input_desc(0)];
+        return vec![PosTexColor::vertex().gfx_vertex_input_desc(gfx_hal::pso::VertexInputRate::Vertex)];
     }
 
     fn layout(&self) -> Layout {
@@ -195,13 +236,13 @@ where
                     },
                 ],
             }],
-            push_constants: vec![/*(gfx_hal::pso::ShaderStageFlags::VERTEX, 0..16)*/],
+            push_constants: vec![],
         };
     }
 
     fn build<'a>(
         self,
-        _ctx: &GraphContext<B>,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
         aux: &Resources,
@@ -213,7 +254,10 @@ where
         assert!(images.is_empty());
         assert_eq!(set_layouts.len(), 1);
 
-        log::info!("DESC BUILD");
+        log::trace!("DESC BUILD");
+
+        let backbuffer_count = aux.fetch::<SwapchainBackbufferCount>().backbuffer_count as usize;
+        assert_ne!(backbuffer_count, 0);
 
         let mut imgui = aux.fetch_mut::<imgui::ImGui>();
         let texture = imgui.prepare_texture(|texture_handle| {
@@ -248,58 +292,108 @@ where
                 .unwrap();
         });
 
-        let mut uniform_buf = factory
-            .create_buffer(
-                BufferInfo {
-                    size: UNIFORM_SIZE,
-                    usage: gfx_hal::buffer::Usage::UNIFORM,
-                },
-                Dynamic,
-            )
-            .unwrap();
+        let mut uniform_buffers = vec![];
+        let mut descriptor_sets = vec![];
+        let mut draw_list_vbufs = vec![];
+        let mut draw_list_ibufs = vec![];
 
-        let descriptor_set = factory
-            .create_descriptor_set(set_layouts[0].clone())
-            .unwrap();
+        // Create uniform buffers and descriptor sets for each backbuffer, since this data can
+        // change frame-to-frame
+        for frame_index in 0..backbuffer_count {
+            let mut uniform_buffer = factory
+                .create_buffer(
+                    BufferInfo {
+                        size: UNIFORM_SIZE,
+                        usage: gfx_hal::buffer::Usage::UNIFORM,
+                    },
+                    Dynamic,
+                )
+                .unwrap();
 
-        unsafe {
-            use gfx_hal::device::Device;
-            factory.device().write_descriptor_sets(vec![
-                gfx_hal::pso::DescriptorSetWrite {
-                    set: descriptor_set.raw(),
-                    binding: 0,
-                    array_offset: 0,
-                    descriptors: vec![gfx_hal::pso::Descriptor::Image(
-                        texture.view().raw(),
-                        gfx_hal::image::Layout::ShaderReadOnlyOptimal,
-                    )],
-                },
-                gfx_hal::pso::DescriptorSetWrite {
-                    set: descriptor_set.raw(),
-                    binding: 1,
-                    array_offset: 0,
-                    descriptors: vec![gfx_hal::pso::Descriptor::Sampler(texture.sampler().raw())],
-                },
-                gfx_hal::pso::DescriptorSetWrite {
-                    set: descriptor_set.raw(),
-                    binding: 0, // Does this binding ID matter?
-                    array_offset: 0,
-                    descriptors: vec![gfx_hal::pso::Descriptor::Buffer(
-                        uniform_buf.raw(),
-                        Some(0)..Some(UNIFORM_SIZE),
-                    )],
-                },
-            ]);
+            let descriptor_set = factory
+                .create_descriptor_set(set_layouts[0].clone())
+                .unwrap();
+
+            uniform_buffers.push(uniform_buffer);
+            descriptor_sets.push(descriptor_set);
+            draw_list_vbufs.push(vec![]);
+            draw_list_ibufs.push(vec![]);
         }
 
-        let vertex_count = 6;
+        // Write descriptor sets for each backbuffer
+        unsafe {
+            for frame_index in 0..backbuffer_count {
+                use gfx_hal::device::Device;
+                factory.device().write_descriptor_sets(vec![
+                    gfx_hal::pso::DescriptorSetWrite {
+                        set: descriptor_sets[frame_index].raw(),
+                        binding: 0,
+                        array_offset: 0,
+                        descriptors: vec![gfx_hal::pso::Descriptor::Image(
+                            texture.view().raw(),
+                            gfx_hal::image::Layout::ShaderReadOnlyOptimal,
+                        )],
+                    },
+                    gfx_hal::pso::DescriptorSetWrite {
+                        set: descriptor_sets[frame_index].raw(),
+                        binding: 1,
+                        array_offset: 0,
+                        descriptors: vec![gfx_hal::pso::Descriptor::Sampler(
+                            texture.sampler().raw(),
+                        )],
+                    },
+                    gfx_hal::pso::DescriptorSetWrite {
+                        set: descriptor_sets[frame_index].raw(),
+                        binding: 0, // Does this binding ID matter?
+                        array_offset: 0,
+                        descriptors: vec![gfx_hal::pso::Descriptor::Buffer(
+                            uniform_buffers[frame_index].raw(),
+                            Some(0)..Some(UNIFORM_SIZE),
+                        )],
+                    },
+                ]);
+            }
+        }
+
+        let quad_vertex_data = [
+            PosTexColor {
+                position: [-0.5, 0.33].into(),
+                tex_coord: [0.0, 1.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+            PosTexColor {
+                position: [0.5, 0.33].into(),
+                tex_coord: [1.0, 1.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+            PosTexColor {
+                position: [0.5, -0.33].into(),
+                tex_coord: [1.0, 0.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+            PosTexColor {
+                position: [-0.5, 0.33].into(),
+                tex_coord: [0.0, 1.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+            PosTexColor {
+                position: [0.5, -0.33].into(),
+                tex_coord: [1.0, 0.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+            PosTexColor {
+                position: [-0.5, -0.33].into(),
+                tex_coord: [0.0, 0.0].into(),
+                color: [255, 255, 255, 255].into(),
+            },
+        ];
 
         #[cfg(feature = "spirv-reflection")]
-        let vbuf_size =
-            SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * vertex_count;
+        let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64
+            * quad_vertex_data.len() as u64;
 
         #[cfg(not(feature = "spirv-reflection"))]
-        let vbuf_size = PosTexColor::vertex().stride as u64 * vertex_count;
+        let vbuf_size = PosTexColor::vertex().stride as u64 * quad_vertex_data.len() as u64;
 
         let mut quad_vbuf = factory
             .create_buffer(
@@ -314,89 +408,29 @@ where
         unsafe {
             // Fresh buffer.
             factory
-                .upload_visible_buffer(
-                    &mut quad_vbuf,
-                    0,
-                    &[
-                        PosTexColor {
-                            position: [-0.5, 0.33].into(),
-                            tex_coord: [0.0, 1.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                        PosTexColor {
-                            position: [0.5, 0.33].into(),
-                            tex_coord: [1.0, 1.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                        PosTexColor {
-                            position: [0.5, -0.33].into(),
-                            tex_coord: [1.0, 0.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                        PosTexColor {
-                            position: [-0.5, 0.33].into(),
-                            tex_coord: [0.0, 1.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                        PosTexColor {
-                            position: [0.5, -0.33].into(),
-                            tex_coord: [1.0, 0.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                        PosTexColor {
-                            position: [-0.5, -0.33].into(),
-                            tex_coord: [0.0, 0.0].into(),
-                            color: [255, 255, 255, 255].into(),
-                        },
-                    ],
-                )
+                .upload_visible_buffer(&mut quad_vbuf, 0, &quad_vertex_data)
                 .unwrap();
         }
 
         Ok(ImguiRenderPipeline {
             texture,
             quad_vbuf,
-            uniform_buf,
-            descriptor_set,
-            draw_list_vbufs: vec![],
-            draw_list_ibufs: vec![],
+            draw_list_vbufs,
+            draw_list_ibufs,
+            descriptor_sets,
+            uniform_buffers,
         })
     }
 }
 
-fn get_uniform_args() -> UniformArgs {
-    let model = glm::scale(&glm::identity(), &glm::make_vec3(&[4.0, -4.0, 1.0]));
-
-    // DETERMINE VIEW MATRIX (just once)
-    let view = glm::look_at_lh(
-        &glm::make_vec3(&[0.0, 0.0, -5.0]),
-        &glm::make_vec3(&[0.0, 0.0, 0.0]),
-        &glm::make_vec3(&[0.0, 1.0, 0.0]).normalize(),
-    );
-
-    // DETERMINE PROJECTION MATRIX (just once)
-    let projection = {
-        let mut temp = glm::perspective_lh_zo(800.0 / 600.0, f32::to_radians(50.0), 0.1, 100.0);
-        temp[(1, 1)] *= -1.0;
-        temp
-    };
-
-    // COMBINE THE VIEW AND PROJECTION MATRIX AHEAD OF TIME (just once)
-    let mvp = model * projection * view;
-
-    return UniformArgs { mvp };
-}
-
 #[derive(Debug)]
 pub struct ImguiRenderPipeline<B: gfx_hal::Backend> {
-    //vertex: Option<Escape<Buffer<B>>>,
     texture: Texture<B>,
     quad_vbuf: Escape<Buffer<B>>,
-    uniform_buf: Escape<Buffer<B>>,
-    descriptor_set: Escape<DescriptorSet<B>>,
-    draw_list_vbufs: Vec<Escape<Buffer<B>>>,
-    draw_list_ibufs: Vec<Escape<Buffer<B>>>,
-    //uniform_buffer: Escape<Buffer<B>>,
+    uniform_buffers: Vec<Escape<Buffer<B>>>,
+    descriptor_sets: Vec<Escape<DescriptorSet<B>>>,
+    draw_list_vbufs: Vec<Vec<Escape<Buffer<B>>>>,
+    draw_list_ibufs: Vec<Vec<Escape<Buffer<B>>>>,
 }
 
 impl<B> SimpleGraphicsPipeline<B, Resources> for ImguiRenderPipeline<B>
@@ -410,31 +444,34 @@ where
         factory: &Factory<B>,
         _queue: QueueId,
         _set_layouts: &[Handle<DescriptorSetLayout<B>>],
-        _index: usize,
+        index: usize,
         aux: &Resources,
     ) -> PrepareResult {
-        log::info!("PREPARE");
+        log::trace!("prepare");
 
-        self.draw_list_vbufs.clear();
-        self.draw_list_ibufs.clear();
+        //TODO: Reuse these instead of dropping them every frame
+        let draw_list_vbufs = &mut self.draw_list_vbufs[index];
+        let draw_list_ibufs = &mut self.draw_list_ibufs[index];
+        let uniform_buffers = &mut self.uniform_buffers[index];
 
-        let uniform_args = get_uniform_args();
-
-        unsafe {
-            factory
-                .upload_visible_buffer(&mut self.uniform_buf, 0, &[uniform_args])
-                .unwrap()
-        };
+        draw_list_vbufs.clear();
+        draw_list_ibufs.clear();
 
         let ui = unsafe {
             if let Some(ui) = imgui::Ui::current_ui() {
                 let ui = ui as *const imgui::Ui;
                 let ui = ui.read();
 
+                // Used for the view/projection
+                let frame_size = ui.frame_size();
+                let uniform_args = UniformArgs::new(&frame_size);
+
+                factory
+                    .upload_visible_buffer(uniform_buffers, 0, &[uniform_args])
+                    .unwrap();
+
                 ui.render::<_, ()>(|ui, draw_lists| {
                     for draw_list in &draw_lists {
-                        log::info!("draw list");
-
                         // VERTEX BUFFER
                         let vertex_count = draw_list.vtx_buffer.len() as u64;
 
@@ -462,7 +499,7 @@ where
                                 .unwrap();
                         }
 
-                        self.draw_list_vbufs.push(vbuf);
+                        draw_list_vbufs.push(vbuf);
 
                         //INDEX BUFFER
                         let ibuf_size =
@@ -483,7 +520,7 @@ where
                                 .unwrap();
                         }
 
-                        self.draw_list_ibufs.push(ibuf);
+                        draw_list_ibufs.push(ibuf);
                     }
 
                     return Ok(());
@@ -498,30 +535,23 @@ where
         &mut self,
         layout: &B::PipelineLayout,
         mut encoder: RenderPassEncoder<'_, B>,
-        _index: usize,
+        index: usize,
         _aux: &Resources,
     ) {
-        log::info!("DRAW");
+        log::trace!("draw");
+
+        let draw_list_vbufs = &self.draw_list_vbufs[index];
+        let draw_list_ibufs = &self.draw_list_ibufs[index];
 
         encoder.bind_graphics_descriptor_sets(
             layout,
             0,
-            std::iter::once(self.descriptor_set.raw()),
+            std::iter::once(self.descriptor_sets[index].raw()),
             std::iter::empty::<u32>(),
         );
 
         encoder.bind_vertex_buffers(0, Some((self.quad_vbuf.raw(), 0)));
-        //encoder.bind_index_buffer()
         encoder.draw(0..6, 0..1);
-
-        //        let uniform_args = get_uniform_args();
-
-        //        encoder.push_constants(
-        //            layout,
-        //            gfx_hal::pso::ShaderStageFlags::VERTEX,
-        //            0,
-        //            gfx_hal::memory::cast_slice::<f32, u32>(&uniform_args.mvp.data),
-        //        );
 
         unsafe {
             use imgui::sys;
@@ -540,13 +570,11 @@ where
                 //TODO: Verify the draw list index doesn't exceed the vbuf/ibuf list
                 let mut draw_list_index = 0;
                 for draw_list in draw_lists {
-                    encoder.bind_vertex_buffers(
-                        0,
-                        Some((self.draw_list_vbufs[draw_list_index].raw(), 0)),
-                    );
+                    encoder
+                        .bind_vertex_buffers(0, Some((draw_list_vbufs[draw_list_index].raw(), 0)));
 
                     encoder.bind_index_buffer(
-                        self.draw_list_ibufs[draw_list_index].raw(),
+                        draw_list_ibufs[draw_list_index].raw(),
                         0,
                         gfx_hal::IndexType::U16,
                     );
@@ -566,10 +594,4 @@ where
     }
 
     fn dispose(self, _factory: &mut Factory<B>, _aux: &Resources) {}
-}
-
-pub trait ImguiRenderPipelineAux {
-    fn visit_imgui<'a, F, T>(&self, f: F) -> T
-    where
-        F: FnOnce(&mut imgui::ImGui) -> T;
 }

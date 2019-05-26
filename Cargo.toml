@@ -1,0 +1,35 @@
+[package]
+name = "rendy-imgui"
+version = "0.1.0"
+authors = [""]
+edition = "2018"
+
+[features]
+default = ["metal", "rendy/full"]
+dx12 = ["rendy/dx12"]
+metal = ["rendy/metal"]
+vulkan = ["rendy/vulkan"]
+spriv-reflection = ["rendy/spirv-reflection"]
+
+[dependencies]
+rendy="0.2"
+genmesh = "0.6"
+nalgebra = "0.18"
+nalgebra-glm = "0.4"
+env_logger = "0.6"
+failure = "0.1"
+lazy_static = "1.0"
+log = "0.4"
+winit = "0.19"
+palette = "0.4"
+rand = "0.6"
+gfx-hal = "0.2"
+imgui = "0.0.24-pre"
+imgui-winit-support = "0.0.24-pre"
+shred = "0.7"
+
+[patch.crates-io]
+#rendy = { git = 'https://github.com/amethyst/rendy.git' }
+#rendy = { path = '/Users/philipd/dev/rust/rendy/rendy'}
+imgui = { git = 'https://github.com/Gekkio/imgui-rs.git' }
+imgui-winit-support = { git = 'https://github.com/Gekkio/imgui-rs.git' }

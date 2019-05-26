@@ -78,6 +78,8 @@ fn init_imgui(window: &winit::Window) -> imgui::ImGui {
 
     imgui.set_font_global_scale((1.0 / hidpi_factor) as f32);
 
+    imgui_winit_support::configure_keys(&mut imgui);
+
     return imgui;
 }
 
@@ -85,7 +87,7 @@ fn init_render_graph(
     factory: &mut Factory<Backend>,
     families: &mut Families<Backend>,
     surface: Surface<Backend>,
-    aux: &Resources,
+    aux: &mut Resources,
 ) -> Graph<Backend, Resources> {
     // GraphBuilder gives us a declarative interface for describing what/how to render. Using this
     // structure rather than directly making calls on a GPU backend means much of the error
@@ -94,7 +96,7 @@ fn init_render_graph(
 
     // The frame starts with a cleared color buffer
     let color = graph_builder.create_image(
-        surface.kind(),
+        gfx_hal::Surface::kind(surface.raw()),
         1,
         factory.get_surface_format(&surface),
         Some(gfx_hal::command::ClearValue::Color(
@@ -103,7 +105,7 @@ fn init_render_graph(
     );
 
     let depth = graph_builder.create_image(
-        surface.kind(),
+        gfx_hal::Surface::kind(surface.raw()),
         1,
         gfx_hal::format::Format::D16Unorm,
         Some(gfx_hal::command::ClearValue::DepthStencil(
@@ -137,10 +139,38 @@ fn init_render_graph(
             .into_pass(),
     );
 
+    let present_builder = PresentNode::builder(&factory, surface, color).with_dependency(pass2);
+    let swapchain_backbuffer_count = present_builder.image_count();
+
+    aux.insert(gui::SwapchainBackbufferCount::new(
+        swapchain_backbuffer_count,
+    ));
+
     // Then present the pass to the screen
-    graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass2));
+    graph_builder.add_node(present_builder);
 
     return graph_builder.build(factory, families, aux).unwrap();
+}
+
+fn imgui_ui_render(window: &winit::Window, ui: &mut imgui::Ui) {
+    use imgui::im_str;
+    use imgui::ImGuiCond;
+
+    ui.window(im_str!("Hello world"))
+        .size((300.0, 100.0), ImGuiCond::FirstUseEver)
+        .position((500.0, 500.0), ImGuiCond::FirstUseEver)
+        .build(|| {
+            ui.text(im_str!("Hello world!"));
+            ui.text(im_str!("こんにちは世界！"));
+            ui.text(im_str!("This...is...imgui-rs!"));
+            ui.separator();
+            let mouse_pos = ui.imgui().mouse_pos();
+            ui.text(im_str!(
+                "Mouse Position: ({:.1},{:.1})",
+                mouse_pos.0,
+                mouse_pos.1
+            ));
+        });
 }
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
@@ -149,7 +179,7 @@ fn run(
     factory: &mut Factory<Backend>,
     families: &mut Families<Backend>,
     graph: &mut Graph<Backend, Resources>,
-    window: std::sync::Arc<winit::Window>,
+    window: &winit::Window,
     resources: &mut Resources,
 ) -> Result<(), failure::Error> {
     loop {
@@ -157,9 +187,18 @@ fn run(
 
         factory.maintain(families);
 
+        let mut imgui = resources.fetch_mut::<imgui::ImGui>();
+
         event_loop.poll_events(|evt| {
             use winit::Event;
             use winit::WindowEvent;
+
+            imgui_winit_support::handle_event(
+                &mut imgui,
+                &evt,
+                window.get_hidpi_factor(),
+                window.get_hidpi_factor().round(),
+            );
 
             match evt {
                 // Close if the window is killed
@@ -198,7 +237,8 @@ fn run(
         let window_size = window.get_inner_size();
         let window_size = window_size.unwrap();
 
-        let mut imgui = resources.fetch_mut::<imgui::ImGui>();
+        imgui_winit_support::update_mouse_cursor(&imgui, &window);
+
         let mut ui = imgui.frame(
             imgui::FrameSize {
                 logical_size: (window_size.width, window_size.height),
@@ -219,26 +259,6 @@ fn run(
     Ok(())
 }
 
-fn imgui_ui_render(window: &winit::Window, ui: &mut imgui::Ui) {
-    use imgui::im_str;
-    use imgui::ImGuiCond;
-
-    ui.window(im_str!("Hello world"))
-        .size((300.0, 100.0), ImGuiCond::FirstUseEver)
-        .build(|| {
-            ui.text(im_str!("Hello world!"));
-            ui.text(im_str!("こんにちは世界！"));
-            ui.text(im_str!("This...is...imgui-rs!"));
-            ui.separator();
-            let mouse_pos = ui.imgui().mouse_pos();
-            ui.text(im_str!(
-                "Mouse Position: ({:.1},{:.1})",
-                mouse_pos.0,
-                mouse_pos.1
-            ));
-        });
-}
-
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     // Setup logging
@@ -246,7 +266,7 @@ fn main() {
         .filter_level(log::LevelFilter::Trace)
         .filter_module("gfx_backend_metal", log::LevelFilter::Error)
         .filter_module("rendy", log::LevelFilter::Error)
-        .filter_module("rendy_imgui::gui", log::LevelFilter::Trace)
+        .filter_module("rendy_imgui::gui", log::LevelFilter::Debug)
         //.filter_module("gui", log::LevelFilter::Trace)
         .init();
 
@@ -276,17 +296,17 @@ fn main() {
     resources.insert(imgui);
 
     // Now that we have a window, we can create a surface
-    let window: std::sync::Arc<winit::Window> = window.into();
-    let surface = factory.create_surface(window.clone());
+    //let window: std::sync::Arc<winit::Window> = window.into();
+    let surface = factory.create_surface(&window);
 
-    let mut graph = init_render_graph(&mut factory, &mut families, surface, &resources);
+    let mut graph = init_render_graph(&mut factory, &mut families, surface, &mut resources);
 
     run(
         &mut event_loop,
         &mut factory,
         &mut families,
         &mut graph,
-        window,
+        &window,
         &mut resources,
     )
     .unwrap();

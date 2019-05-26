@@ -82,7 +82,7 @@ where
     }
 
     fn load_shader_set(&self, factory: &mut Factory<B>, _aux: &T) -> rendy::shader::ShaderSet<B> {
-        SHADERS.build(factory).unwrap()
+        SHADERS.build(factory, Default::default()).unwrap()
     }
 
     fn vertices(
@@ -90,7 +90,7 @@ where
     ) -> Vec<(
         Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
         gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        gfx_hal::pso::VertexInputRate,
     )> {
         #[cfg(feature = "spirv-reflection")]
         return vec![SHADER_REFLECTION
@@ -99,7 +99,7 @@ where
             .gfx_vertex_input_desc(0)];
 
         #[cfg(not(feature = "spirv-reflection"))]
-        return vec![PosTex::vertex().gfx_vertex_input_desc(0)];
+        return vec![PosTex::vertex().gfx_vertex_input_desc(gfx_hal::pso::VertexInputRate::Vertex)];
     }
 
     fn layout(&self) -> Layout {
