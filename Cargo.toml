@@ -29,7 +29,5 @@ imgui-winit-support = "0.0.24-pre"
 shred = "0.7"
 
 [patch.crates-io]
-#rendy = { git = 'https://github.com/amethyst/rendy.git' }
-#rendy = { path = '/Users/philipd/dev/rust/rendy/rendy'}
 imgui = { git = 'https://github.com/Gekkio/imgui-rs.git' }
 imgui-winit-support = { git = 'https://github.com/Gekkio/imgui-rs.git' }
